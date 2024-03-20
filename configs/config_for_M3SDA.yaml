@@ -1,0 +1,46 @@
+record_dir: 'Records'
+checkpoint_dir: 'CheckPoints'
+resume: True
+eval_only: False
+test_model: "best" #"last" # 100
+no_cuda: False
+max_epoch: 100
+save_period: 50
+test_period: 1
+save_model: True
+seed: 1
+enable_early_stop: True
+log_txt: True
+write_logs: True
+
+dataset: 'DigitsFive' # 'Office31' # 'OfficeHome' #
+source: ['svhn']
+target: 'mnist'
+data_cached: True
+scale: 32 #224 #
+batch_size: 64
+
+use_resnet: True
+train_resnet: False
+num_generator_update: 4
+num_classifier: 2
+ensemble_schema: 'acc_weighted'
+use_abs_diff: False
+loss_config:
+  msda_type: 'moment'
+  msda_weight: 0.0005
+  params: 5
+  
+  # msda_type: 'mmd'
+  # msda_weight: 10
+  # params: [1,2,5,10]
+
+  # msda_type: 'gcsd'
+  # msda_weight: 0.5
+
+  # msda_type: 'gjrd'
+  # msda_weight: 0.5
+  # params: 2
+
+optimizer: 'Adam'
+lr: 0.0002
