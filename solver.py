@@ -23,8 +23,8 @@ from utils import (update_callback,
                    clear_directory,
                    myEventLoader)
 
-logdir = join(get_father_path(4), 'logs')
-# logdir = join('G:/MyCode', 'logs')
+# logdir = join(get_father_path(4), 'logs')
+logdir = join('G:/MyCode', 'Logs')
 # Training settings
 class Solver(object):
     def __init__(self, 
@@ -154,7 +154,9 @@ class Solver(object):
         self.seed = seed
         self.epoch = 0       
         self.test_acc = torch.zeros([1,])    
-        self.test_acc_best = torch.zeros([1,])       
+        self.test_acc_best = torch.zeros([1,])
+        self.val_acc = torch.zeros([1,])     
+        self.val_acc_best = torch.zeros([1,])      
 
         self.target = target if isinstance(target, str) else self.domain_all[target]
         indx = target if isinstance(target, int) else self.domain_all.index(target)
@@ -182,12 +184,12 @@ class Solver(object):
         
         print('dataset loaded!\n')
         self.max_iter = (len(self.datasets)*self.max_epoch)
+        self.max_iter_val = (len(self.dataset_val)*self.max_epoch)
         self.max_iter_test = (len(self.dataset_test)*self.max_epoch)
         self.verify_features()
         self.train_save_period = min(self.save_period, max(1,int(len(self.datasets)/3.0)))
         self.test_save_period = len(self.dataset_test)
-        # self.test_save_period = min(self.save_period, max(1,int(len(self.dataset_test)/3.0)))
-    
+        self.val_save_period = len(self.dataset_val)
 
         print(f'model loading for {join(self.model_type, self.msda_type, self.dataset)}...')
         self.model = globals()[self.model_type](
@@ -249,6 +251,7 @@ class Solver(object):
         if self.write_logs:
             os.makedirs(self.log_dir,exist_ok=True)
             self.record_train_csv = join(self.log_dir, f'train_results.csv')
+            self.record_val_csv= join(self.log_dir, f'val_results.csv')
             self.record_test_csv= join(self.log_dir, f'test_results.csv')
         if self.save_model:
             os.makedirs(self.ckpt_dir,exist_ok=True)
@@ -274,15 +277,15 @@ class Solver(object):
         elif self.optimizer == 'Adam':
             kwargs=dict(lr=self.lr, weight_decay=0.0005)
         if self.model_type=='BCDA':
-            self.opt_g = [getattr(optim, self.optimizer)(sourceNet.parameters(), **kwargs)for sourceNet in self.model.sharedNets[:-1]]
+            self.opt_gs = getattr(optim, self.optimizer)(self.model.sharedNets[0].parameters(), **kwargs)
+            self.opt_gt= getattr(optim, self.optimizer)(self.model.sharedNets[1].parameters(), **kwargs)
             self.opt_c = getattr(optim, self.optimizer)(self.model.clsFCs.parameters(), **kwargs)
             self.opt_a = getattr(optim, self.optimizer)(self.model.fusionNet.parameters(), **kwargs)
-            self.opt_gt= getattr(optim, self.optimizer)(self.model.sharedNets[-1].parameters(), **kwargs)
-            self.opt_all = [self.opt_c, self.opt_a]+self.opt_g
+            self.opt_all = [self.opt_c, self.opt_a, self.opt_gs, self.opt_gt]
         else:
-            self.opt_g = getattr(optim, self.optimizer)(self.model.sharedNets.parameters(), **kwargs)
+            self.opt_gs = getattr(optim, self.optimizer)(self.model.sharedNets.parameters(), **kwargs)
             self.opt_c = [getattr(optim, self.optimizer)(cls.parameters(), **kwargs) for cls in self.model.clsFCs]  
-            self.opt_all = [self.opt_g]+self.opt_c
+            self.opt_all = [self.opt_gs]+self.opt_c
             if self.model_type=='MFSAN':
                 self.opt_s = [getattr(optim, self.optimizer)(son.parameters(), **kwargs) for son in self.model.sonNets]             
                 self.opt_all = self.opt_all+self.opt_s
@@ -306,7 +309,7 @@ class Solver(object):
         return loss_dict
     
     def lr_to_dict(self):
-        # lr_dict = dict(lr_g=self.opt_g.param_groups[0]["lr"],
+        # lr_dict = dict(lr_g=self.opt_gs.param_groups[0]["lr"],
         #                **{f'lr_c{i+1}': opt.param_groups[0]["lr"] for i,opt in enumerate(self.opt_c)})
         lr_dict = {f"lr_{i}": opt.param_groups[0]["lr"] for i,opt in enumerate(self.opt_all)}
         return lr_dict
@@ -327,10 +330,11 @@ class Solver(object):
         update_callback(self.writer, iteration, update_dict)
         return update_dict
 
-    def log_update_test(self, test_loss, acc, accs, iteration):
-        eval_dict = dict(test_loss=test_loss.data.item(), 
-                         acc=acc.data.item(),
+    def log_update_eval(self, acc, accs, iteration, eval_loss=None):
+        eval_dict = dict(acc=acc.data.item(),
                          **{f'acc{i+1}': acc.data.item() for i,acc in enumerate(accs)})
+        if eval_loss is not None:
+            eval_dict['eval_loss'] = eval_loss.tolist()
         update_callback(self.writer, iteration, eval_dict)
         return eval_dict
     
@@ -373,9 +377,13 @@ class Solver(object):
         if mode=="train":
             iteration = batch_idx+1+self.epoch*len(self.datasets)
             flag=(iteration<self.train_save_period or iteration % self.train_save_period == 0)
-        else:
+        elif mode=="test":
             iteration = batch_idx+1+(self.epoch-1)*len(self.dataset_test)
             flag=(iteration<self.test_save_period or iteration % self.test_save_period == 0)
+        else:
+            iteration = batch_idx+1+(self.epoch-1)*len(self.dataset_val)
+            flag=(iteration<self.val_save_period or iteration % self.val_save_period == 0)
+
         return iteration, flag
 
     def train_BCDA(self):
@@ -387,7 +395,7 @@ class Solver(object):
             
             ### ********************************************************************************
             ### ***************************    procedure 1    **********************************
-            ###     fix Gs, and train A to get barycenter of all srcs with minimizing BCD of
+            ###     fix Gt, C, and train Gs,A to get barycenter of all srcs with minimizing BCD of
             ###          (z_1,\cdots,z_s,\bar{z})
             self.reset_grad()     
             for _ in range(self.num_generator_update):
@@ -396,12 +404,12 @@ class Solver(object):
                                                         copy(self.loss_config))
                 loss_src_bc.backward()
                 self.opt_a.step()
+                self.opt_gs.step()
                 self.reset_grad()
-            ### ********************************************************************************
 
             ### ********************************************************************************
             ### ***************************    procedure 2    **********************************
-            ### fix Gs, A, and train Gt to align z_t to \bar{z} with their discrepency 
+            ### fix Gs, A, C, and train Gt to align z_t to \bar{z} with their discrepency 
             for _ in range(self.num_generator_update):
                 feats, outputs = self.forward_all(features)
                 loss_tgt_bc = self.model.loss_tgt_align(feats[1], feats[-1], self.msda_crit, 
@@ -409,10 +417,10 @@ class Solver(object):
                 loss_tgt_bc.backward()
                 self.opt_gt.step()
                 self.reset_grad()
+
             ### ******************************************************************************** 
-                ### ********************************************************************************
             ### ***************************    procedure 3    **********************************
-            ###                             train all
+            ###                             train all and mainly C
             feats, outputs = self.forward_all(features)
             loss_c, loss_src_align, loss_tgt_align = self.loss_all_domain(feats, outputs, labels[:-1])
             
@@ -487,7 +495,7 @@ class Solver(object):
                 outputs = self.forward(features[-1])[1]
                 loss_dis = self.discrepancy(outputs)
                 loss_dis.backward()
-                self.opt_g.step()
+                self.opt_gs.step()
                 self.reset_grad()
                 loss_diss.append(loss_dis)
             ### ********************************************************************************    
@@ -560,6 +568,57 @@ class Solver(object):
             return self.train_MFSAN()
         elif self.model_type=="BCDA":
             return self.train_BCDA()
+        
+    def validate(self, patience=10, stop_criterion=0.001):
+        start_time = time.time()
+        self.model.eval()
+        size, iteration, acc, df_dict = 0, 0, 0, {}
+        corrects = list(torch.zeros(self.num_source))
+        for batch_idx, (features,labels) in enumerate(self.dataset_val):  
+            # test on the target domain which placed in the last, source performance is not important
+            features = [feature.cuda()  for feature in features]
+            labels   = [label.long().cuda() for label in labels[:-1]]       
+
+            outputs = self.forward_all(features)[1]
+
+            size += (labels[0].shape[0])     
+            corrects = torch.stack([correct+get_correct(output,label) for correct,output,label in zip(corrects,outputs,labels)])
+            accs = 100.*corrects/size
+            acc = sum(accs)/self.num_source
+            iteration, update = self.get_display_flag(batch_idx, "val")
+            if update or batch_idx==len(self.dataset_val)-1:
+                string1 = f' [Epo-{self.epoch}/{self.max_epoch}--Bat-{batch_idx+1}/{len(self.dataset_val)}] ({100.* iteration/self.max_iter_val:2.2f}%): Acc'
+                string2 = '\t'.join(f'On {self.sources[num]}-->{Correct}/{size} ({Acc:2.2f}%)' for num,(Correct,Acc) in enumerate(zip(corrects,accs)))
+                print(f"validation {self.record_name+string1+string2}\tmean-->{acc}")
+                if self.write_logs:  
+                    df_dict = self.log_update_eval(acc, accs, iteration)
+        self.val_acc = acc
+        refresh_best = False  
+        if self.val_acc_best<self.val_acc:
+            self.val_acc_best=self.val_acc
+            refresh_best = True
+        if self.val_acc/100>1.0-1.0e-5 or (self.enable_early_stop and earlystop(self.val_acc/100, patience=patience, eps=stop_criterion)):
+            self.early_stopped=True
+                         
+        if self.save_model:
+            state_dict = dict(epoch=self.epoch, 
+                              seed=self.seed, 
+                              early_stopped=self.early_stopped, 
+                              test_acc_best=self.test_acc_best,
+                              model=self.model.state_dict())
+            if self.epoch % self.save_period == 1:
+                torch.save(state_dict, join(self.ckpt_dir, f'model_epoch_{self.epoch}.ckpt'))
+            torch.save(state_dict, join(self.ckpt_dir,'model_last.ckpt'))
+            if refresh_best:
+                self.best_model=self.epoch
+                torch.save(state_dict, join(self.ckpt_dir,'model_val_best.ckpt'))
+                
+        if self.write_logs and self.log_txt:
+            data_to_append = pd.DataFrame(df_dict, columns=df_dict.keys() if iteration==1 else None, index=[iteration])
+            data_to_append.to_csv(self.record_val_csv, mode='a', index_label="iteration", 
+                                    header=True if (iteration==1 or not exists(self.record_val_csv)) else False) 
+        return time.time()-start_time
+
 
     def test(self, patience=10, stop_criterion=0.001):
         start_time = time.time()
@@ -595,7 +654,7 @@ class Solver(object):
                          +f'  Acc->{correct}/{size} ({acc:.2f}%)'
                 print(f"Test {self.record_name+string1+string2}")
                 if self.write_logs:  
-                    df_dict = self.log_update_test(test_loss, acc, accs, iteration)
+                    df_dict = self.log_update_eval(acc, accs, iteration, test_loss)
         print(f"Test {self.record_name}({100.* iteration/self.max_iter_test:2.2f}%) [Epo--{self.epoch}/{self.max_epoch}]: Acc-->{round(acc.item() ,2)}")
         self.test_acc = acc 
         refresh_best = False  

@@ -1,3 +1,4 @@
+root_dir: 'MSDA_logs'
 record_dir: 'Records'
 checkpoint_dir: 'CheckPoints'
 resume: True

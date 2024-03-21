@@ -23,18 +23,10 @@ if __name__ == '__main__':
     # args.cuda = False
     args.data_cache = args.cuda
 
-    # # processing data with resnet first
-    # for dataset in ['OfficeCaltech10', 'Office31', 'OfficeHome', 'PACS', 'VLCS', 'DigitsFive']:
-    #     args.resnet_type = "resnet18" if dataset=='DigitsFive' else "resnet50"
-    #     args.dataset = dataset
-    #     solver = Solver(**args)
-    #     solver.load_data_and_model(solver.domain_all[0], seed=1, version=0)
-    #     print(solver.datasets.feature_shapes)
-                
-    # args.model_type = "M3SDA"
     args.model_type = "BCDA"
     # train msda tasks
-    for dataset in ['DigitsFive', 'Office31', 'OfficeHome', 'PACS', 'VLCS']:
+    # for dataset in ['DigitsFive', 'Office31', 'OfficeHome', 'PACS', 'VLCS']:
+    for dataset in ['PACS']:
         args.resnet_type = "resnet18" if dataset=='DigitsFive' else "resnet50"
         args.batch_size = 256 if dataset=='DigitsFive' else 128
         args.dataset = dataset
